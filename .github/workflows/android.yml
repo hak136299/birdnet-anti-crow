@@ -1,0 +1,41 @@
+
+name: Build BirdNET Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout BirdNET Live
+        uses: actions/checkout@v4
+        with:
+          repository: birdnet-team/birdnet-live-app
+          ref: main
+          lfs: true
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Generate localizations
+        run: flutter gen-l10n
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: birdnet-live-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error

@@ -1,5 +1,5 @@
 
-name: Build BirdNET Android APK
+name: Build Simple Android App
 
 on:
   workflow_dispatch:
@@ -12,23 +12,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout BirdNET Live
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
         with:
-          repository: birdnet-team/birdnet-live-app
-          ref: main
-          lfs: true
+          distribution: temurin
+          java-version: '17'
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
+      - name: Create Android project files
+        run: flutter create --platforms=android --project-name simple_android_app .
+
       - name: Install dependencies
         run: flutter pub get
-
-      - name: Generate localizations
-        run: flutter gen-l10n
 
       - name: Build APK
         run: flutter build apk --release
@@ -36,6 +38,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: birdnet-live-apk
+          name: simple-android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error

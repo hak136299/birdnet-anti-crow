@@ -1,4 +1,5 @@
 
+
 name: Build Simple Android App
 
 on:
@@ -26,11 +27,20 @@ jobs:
         with:
           channel: stable
 
+      - name: Check Flutter project
+        run: flutter --version
+
       - name: Create Android project files
         run: flutter create --platforms=android --project-name simple_android_app .
 
+      - name: Show dependencies
+        run: cat pubspec.yaml
+
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Verify record package
+        run: flutter pub deps
 
       - name: Build APK
         run: flutter build apk --release

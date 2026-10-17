@@ -1,10 +1,13 @@
 
+
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 void main() {
   runApp(const CrowApp());
@@ -19,9 +22,7 @@ class CrowApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'دفع کلاغ',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.green,
-        ),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
       ),
       home: const CrowHomePage(),
@@ -38,10 +39,13 @@ class CrowHomePage extends StatefulWidget {
 
 class _CrowHomePageState extends State<CrowHomePage> {
   final AudioRecorder _recorder = AudioRecorder();
+  final AudioPlayer _player = AudioPlayer();
 
   StreamSubscription<Uint8List>? _audioSubscription;
+  StreamSubscription<void>? _completeSubscription;
 
   bool isRunning = false;
+  bool isPlaying = false;
   String status = 'برنامه متوقف است';
 
   int _receivedBytes = 0;
@@ -83,7 +87,6 @@ class _CrowHomePageState extends State<CrowHomePage> {
         (data) {
           _receivedBytes += data.length;
 
-          // هر ۵ ثانیه، دریافت صدا را گزارش می‌کنیم.
           const fiveSecondsBytes = 16000 * 2 * 5;
 
           if (_receivedBytes >= fiveSecondsBytes) {
@@ -121,9 +124,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
     try {
       await _recorder.stop();
-    } catch (_) {
-      // آزاد کردن وضعیت برنامه حتی در صورت خطای توقف
-    }
+    } catch (_) {}
 
     if (mounted) {
       setState(() {
@@ -134,10 +135,58 @@ class _CrowHomePageState extends State<CrowHomePage> {
     }
   }
 
+  Future<void> playRandomSound() async {
+    if (isPlaying) return;
+
+    final resumeListening = isRunning;
+
+    if (resumeListening) {
+      await stopListening();
+    }
+
+    try {
+      final number = Random().nextInt(30) + 1;
+
+      setState(() {
+        isPlaying = true;
+        status = 'در حال پخش فایل شماره $number';
+      });
+
+      await _player.play(AssetSource('sounds/$number.wav'));
+
+      await _completeSubscription?.cancel();
+      _completeSubscription = _player.onPlayerComplete.listen((_) async {
+        if (!mounted) return;
+
+        setState(() {
+          isPlaying = false;
+          status = 'پخش صدا تمام شد';
+        });
+
+        if (resumeListening) {
+          await startListening();
+        }
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          isPlaying = false;
+          status = 'پخش صدا ناموفق بود';
+        });
+      }
+
+      if (resumeListening) {
+        await startListening();
+      }
+    }
+  }
+
   Future<void> exitApp() async {
     if (isRunning) {
       await stopListening();
     }
+
+    await _player.stop();
 
     if (!mounted) return;
 
@@ -167,7 +216,9 @@ class _CrowHomePageState extends State<CrowHomePage> {
   @override
   void dispose() {
     _audioSubscription?.cancel();
+    _completeSubscription?.cancel();
     _recorder.dispose();
+    _player.dispose();
     super.dispose();
   }
 
@@ -178,10 +229,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
         centerTitle: true,
         title: const Text(
           'برنامهٔ دفع کلاغ',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-          ),
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
         ),
         backgroundColor: Colors.green,
         foregroundColor: Colors.white,
@@ -201,16 +249,13 @@ class _CrowHomePageState extends State<CrowHomePage> {
               Text(
                 status,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w500,
-                ),
+                style: const TextStyle(fontSize: 18),
               ),
               const SizedBox(height: 32),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: isRunning ? null : startListening,
+                  onPressed: isRunning || isPlaying ? null : startListening,
                   child: const Text('شروع شنود'),
                 ),
               ),
@@ -229,6 +274,14 @@ class _CrowHomePageState extends State<CrowHomePage> {
               const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: isPlaying ? null : playRandomSound,
+                  child: const Text('پخش صدای آزمایشی'),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
                 child: OutlinedButton.icon(
                   onPressed: exitApp,
                   icon: const Icon(Icons.exit_to_app),
@@ -242,4 +295,3 @@ class _CrowHomePageState extends State<CrowHomePage> {
     );
   }
 }
-

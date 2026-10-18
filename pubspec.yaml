@@ -12,15 +12,19 @@ dependencies:
     sdk: flutter
   record: ^6.1.2
   audioplayers: ^6.5.1
+  flutter_onnxruntime: 1.9.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
 
-
 flutter:
   uses-material-design: true
 
   assets:
     - assets/sounds/
+    - assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_FP16.onnx
+    - assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_Labels.csv
+    - assets/models/model_config.json
+    - assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_ScoreBlacklist.json

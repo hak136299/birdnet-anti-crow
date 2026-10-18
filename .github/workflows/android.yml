@@ -1,5 +1,4 @@
 
-
 name: Build Simple Android App
 
 on:
@@ -13,11 +12,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-     
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
+
+      - name: Checkout BirdNET model repository
+        uses: actions/checkout@v4
+        with:
+          repository: birdnet-team/birdnet-live-app
+          ref: main
+          path: birdnet-live-app
+          lfs: true
+
       - name: Install Java
         uses: actions/setup-java@v4
         with:
@@ -32,6 +39,23 @@ jobs:
       - name: Check Flutter project
         run: flutter --version
 
+      - name: Copy BirdNET model files
+        run: |
+          mkdir -p assets/models
+
+          cp birdnet-live-app/assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_FP16.onnx assets/models/
+          cp birdnet-live-app/assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_Labels.csv assets/models/
+          cp birdnet-live-app/assets/models/model_config.json assets/models/
+          cp birdnet-live-app/assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_ScoreBlacklist.json assets/models/
+
+          echo "Checking ONNX model..."
+          ls -lh assets/models/
+
+          if grep -q "version https://git-lfs.github.com/spec/v1" assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_FP16.onnx; then
+            echo "ERROR: ONNX model is only an LFS pointer"
+            exit 1
+          fi
+
       - name: Create Android project files
         run: flutter create --platforms=android --project-name simple_android_app .
 
@@ -41,7 +65,7 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Verify record package
+      - name: Verify dependencies
         run: flutter pub deps
 
       - name: Build APK
@@ -53,3 +77,5 @@ jobs:
           name: simple-android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+

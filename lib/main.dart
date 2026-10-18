@@ -20,9 +20,13 @@ class CrowApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'دفع کلاغ',
+      title: 'ضد کلاغ حاج اصغر',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF00A878),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF101820),
         useMaterial3: true,
       ),
       home: const CrowHomePage(),
@@ -50,7 +54,10 @@ class _CrowHomePageState extends State<CrowHomePage> {
   static const int _inputWindowSamples =
       _inputSampleRate * _windowSeconds;
   static const int _inputWindowBytes = _inputWindowSamples * 2;
-  static const double _crowThreshold = 0.35;
+
+  static const double _minThreshold = 0.10;
+  static const double _maxThreshold = 0.95;
+  static const double _thresholdStep = 0.05;
 
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
@@ -63,6 +70,8 @@ class _CrowHomePageState extends State<CrowHomePage> {
   final List<int> _pendingAudioBytes = [];
   List<String> _labels = [];
 
+  double _crowThreshold = 0.35;
+
   bool isRunning = false;
   bool isPlaying = false;
   bool _isAnalyzing = false;
@@ -71,7 +80,9 @@ class _CrowHomePageState extends State<CrowHomePage> {
   bool _closing = false;
 
   int _consecutiveCrowDetections = 0;
-  int _lastCrowAnalysisCount = 0;
+
+  // جلوگیری از پخش مکرر تا وقتی زنجیره تشخیص کلاغ قطع نشده است.
+  bool _crowTriggerLatched = false;
 
   String status = 'برنامه متوقف است';
   String detectionText = 'هنوز تحلیلی انجام نشده است';
@@ -145,6 +156,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
     }
 
     final maxIndex = labels.keys.reduce(max);
+
     return List<String>.generate(
       maxIndex + 1,
       (index) => labels[index] ?? 'گونه شماره $index',
@@ -156,6 +168,8 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
     try {
       await _initializeModel();
+
+      if (_closing || !mounted) return;
 
       final hasPermission = await _recorder.hasPermission();
 
@@ -169,7 +183,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
       _pendingAudioBytes.clear();
       _consecutiveCrowDetections = 0;
-      _lastCrowAnalysisCount = 0;
+      _crowTriggerLatched = false;
 
       final audioStream = await _recorder.startStream(
         const RecordConfig(
@@ -201,7 +215,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
           if (!mounted) return;
           setState(() {
             isRunning = false;
-            status = 'خطا در دریافت صدای میکروفون';
+            status = 'خطا در دریافت صدای میکروفون: $error';
           });
         },
       );
@@ -245,8 +259,8 @@ class _CrowHomePageState extends State<CrowHomePage> {
     final bytes = Uint8List.fromList(
       _pendingAudioBytes.sublist(0, _inputWindowBytes),
     );
-    _pendingAudioBytes.removeRange(0, _inputWindowBytes);
 
+    _pendingAudioBytes.removeRange(0, _inputWindowBytes);
     _isAnalyzing = true;
 
     unawaited(() async {
@@ -286,7 +300,6 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
     for (var i = 0; i < input.length; i++) {
       output[i * 2] = input[i];
-
       output[i * 2 + 1] = i + 1 < input.length
           ? (input[i] + input[i + 1]) / 2.0
           : input[i];
@@ -313,6 +326,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
       outputs = await session.run({'input': inputTensor});
 
       final predictionsTensor = outputs['predictions'];
+
       if (predictionsTensor == null) {
         throw StateError('خروجی predictions دریافت نشد');
       }
@@ -329,15 +343,17 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
       indexes.sort((a, b) => scores[b].compareTo(scores[a]));
 
-      final topIndexes = indexes.take(5).toList();
       final lines = <String>[];
 
-      for (final index in topIndexes) {
-        final confidence = (scores[index] * 100).clamp(0.0, 100.0);
-        lines.add('${_labels[index]} — ${confidence.toStringAsFixed(1)}٪');
+      for (final index in indexes.take(5)) {
+        final confidence =
+            (scores[index] * 100).clamp(0.0, 100.0);
+
+        lines.add(
+          '${_labels[index]} — ${confidence.toStringAsFixed(1)}٪',
+        );
       }
 
-      // وجود نام Crow با امتیاز حداقل 0.35 یک تشخیص کلاغ محسوب می‌شود.
       var crowDetected = false;
 
       for (var i = 0; i < count; i++) {
@@ -352,6 +368,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
         _consecutiveCrowDetections++;
       } else {
         _consecutiveCrowDetections = 0;
+        _crowTriggerLatched = false;
       }
 
       if (!mounted) return;
@@ -359,17 +376,17 @@ class _CrowHomePageState extends State<CrowHomePage> {
       setState(() {
         detectionText = lines.join('\n');
         status = crowDetected
-            ? 'کلاغ شناسایی شد (${_consecutiveCrowDetections}/2)'
+            ? 'کلاغ شناسایی شد '
+                '(${_consecutiveCrowDetections}/2)'
             : 'تحلیل انجام شد؛ کلاغ تأیید نشد';
       });
 
-      // فقط یک بار برای هر جفت تشخیص متوالی صدا پخش می‌شود.
       if (crowDetected &&
           _consecutiveCrowDetections >= 2 &&
-          _lastCrowAnalysisCount != _consecutiveCrowDetections &&
+          !_crowTriggerLatched &&
           isRunning &&
           !isPlaying) {
-        _lastCrowAnalysisCount = _consecutiveCrowDetections;
+        _crowTriggerLatched = true;
         await playRandomSound();
       }
     } finally {
@@ -398,7 +415,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
       await _completeSubscription?.cancel();
       _completeSubscription = null;
 
-      if (!mounted) return;
+      if (!mounted || _closing) return;
 
       setState(() {
         isPlaying = true;
@@ -501,98 +518,186 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final thresholdSteps =
+        ((_maxThreshold - _minThreshold) / _thresholdStep).round();
+
     return Scaffold(
       appBar: AppBar(
         centerTitle: true,
-        title: const Text(
-          'برنامهٔ دفع کلاغ',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-        ),
-        backgroundColor: Colors.green,
+        backgroundColor: const Color(0xFF007F5F),
         foregroundColor: Colors.white,
+        title: const Text(
+          'ضد کلاغ حاج اصغر',
+          style: TextStyle(
+            fontSize: 23,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 0.2,
+          ),
+        ),
       ),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(20),
+          padding: const EdgeInsets.all(16),
           child: Column(
             children: [
               Icon(
                 isPlaying
-                    ? Icons.volume_up
+                    ? Icons.volume_up_rounded
                     : isRunning
-                        ? Icons.hearing
-                        : Icons.hearing_disabled,
-                size: 64,
+                        ? Icons.hearing_rounded
+                        : Icons.hearing_disabled_rounded,
+                size: 54,
                 color: isPlaying
                     ? Colors.orange
                     : isRunning
-                        ? Colors.green
+                        ? Colors.greenAccent
                         : Colors.grey,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               Text(
                 status,
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16),
+                style: const TextStyle(fontSize: 15),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
+
+              // تنظیم آستانه تشخیص کلاغ
+              Card(
+                color: const Color(0xFF1C2A33),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'آستانه اطمینان تشخیص کلاغ',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            '${(_crowThreshold * 100).round()}٪',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w900,
+                              color: Colors.greenAccent,
+                              fontSize: 17,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: _crowThreshold,
+                        min: _minThreshold,
+                        max: _maxThreshold,
+                        divisions: thresholdSteps,
+                        label: '${(_crowThreshold * 100).round()}٪',
+                        activeColor: Colors.greenAccent,
+                        onChanged: (value) {
+                          setState(() {
+                            _crowThreshold =
+                                double.parse(value.toStringAsFixed(2));
+
+                            // تغییر آستانه، زنجیره قبلی را ادامه نمی‌دهد.
+                            _consecutiveCrowDetections = 0;
+                            _crowTriggerLatched = false;
+                          });
+                        },
+                      ),
+                      const Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('10٪', style: TextStyle(fontSize: 12)),
+                          Text(
+                            'مقدار اولیه: 35٪',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          Text('95٪', style: TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 8),
               Expanded(
                 child: Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    border: Border.all(color: Colors.grey.shade400),
+                    color: const Color(0xFF1C2A33),
+                    border: Border.all(color: Colors.white24),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: SingleChildScrollView(
                     child: Text(
                       'گونه‌های شناسایی‌شده:\n\n$detectionText',
-                      style: const TextStyle(fontSize: 16),
+                      textAlign: TextAlign.start,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        height: 1.7,
+                      ),
                     ),
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 10),
+
               SizedBox(
                 width: double.infinity,
-                child: ElevatedButton(
+                child: ElevatedButton.icon(
                   onPressed: isRunning || isPlaying ? null : startListening,
-                  child: const Text('شروع شنود'),
+                  icon: const Icon(Icons.hearing),
+                  label: const Text('شروع شنود'),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+
               SizedBox(
                 width: double.infinity,
-                child: ElevatedButton(
+                child: ElevatedButton.icon(
                   onPressed: isRunning ? stopListening : null,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
+                    backgroundColor: Colors.red.shade700,
                     foregroundColor: Colors.white,
                   ),
-                  child: const Text('توقف شنود'),
+                  icon: const Icon(Icons.hearing_disabled),
+                  label: const Text('توقف شنود'),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+
               SizedBox(
                 width: double.infinity,
-                child: ElevatedButton(
+                child: ElevatedButton.icon(
                   onPressed: isPlaying ? null : playRandomSound,
-                  child: const Text('پخش تصادفی'),
+                  icon: const Icon(Icons.shuffle),
+                  label: const Text('پخش تصادفی'),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+
               SizedBox(
                 width: double.infinity,
-                child: ElevatedButton(
+                child: ElevatedButton.icon(
                   onPressed: isPlaying ? stopPlayback : null,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.deepOrange,
                     foregroundColor: Colors.white,
                   ),
-                  child: const Text('قطع پخش'),
+                  icon: const Icon(Icons.stop_circle),
+                  label: const Text('قطع پخش'),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
@@ -608,3 +713,4 @@ class _CrowHomePageState extends State<CrowHomePage> {
     );
   }
 }
+

@@ -13,9 +13,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+     
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        with:
+          lfs: true
       - name: Install Java
         uses: actions/setup-java@v4
         with:

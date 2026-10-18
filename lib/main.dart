@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
@@ -44,12 +45,14 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   bool isRunning = false;
   bool isPlaying = false;
+  bool _resumeListeningAfterPlayback = false;
+
   String status = 'برنامه متوقف است';
 
   int _receivedBytes = 0;
 
   Future<void> startListening() async {
-    if (isRunning) return;
+    if (isRunning || isPlaying) return;
 
     try {
       final hasPermission = await _recorder.hasPermission();
@@ -127,7 +130,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
     if (mounted) {
       setState(() {
         isRunning = false;
-        status = 'برنامه متوقف است';
+        status = isPlaying ? 'در حال پخش صدا' : 'برنامه متوقف است';
         _receivedBytes = 0;
       });
     }
@@ -136,46 +139,67 @@ class _CrowHomePageState extends State<CrowHomePage> {
   Future<void> playRandomSound() async {
     if (isPlaying) return;
 
-    final resumeListening = isRunning;
+    // وضعیت شنود را پیش از شروع پخش ذخیره می‌کنیم.
+    _resumeListeningAfterPlayback = isRunning;
 
-    if (resumeListening) {
+    if (_resumeListeningAfterPlayback) {
       await stopListening();
     }
 
     try {
       final number = Random().nextInt(30) + 1;
 
+      await _completeSubscription?.cancel();
+      _completeSubscription = null;
+
+      if (!mounted) return;
+
       setState(() {
         isPlaying = true;
         status = 'در حال پخش فایل شماره $number';
       });
 
-      await _player.play(AssetSource('sounds/$number.wav'));
-
-      await _completeSubscription?.cancel();
+      // رویداد پایان پخش را قبل از شروع پخش ثبت می‌کنیم.
       _completeSubscription = _player.onPlayerComplete.listen((_) async {
-        if (!mounted) return;
-
-        setState(() {
-          isPlaying = false;
-          status = 'پخش صدا تمام شد';
-        });
-
-        if (resumeListening) {
-          await startListening();
-        }
+        await _finishPlayback('پخش صدا تمام شد');
       });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          isPlaying = false;
-          status = 'پخش صدا ناموفق بود';
-        });
-      }
 
-      if (resumeListening) {
-        await startListening();
-      }
+      await _player.play(AssetSource('sounds/$number.wav'));
+    } catch (e) {
+      await _finishPlayback('پخش صدا ناموفق بود');
+    }
+  }
+
+  Future<void> stopPlayback() async {
+    if (!isPlaying) return;
+
+    // وضعیت قبلی شنود حفظ می‌شود و پس از قطع صدا بررسی خواهد شد.
+    try {
+      await _player.stop();
+    } catch (_) {}
+
+    await _finishPlayback('پخش صدا قطع شد');
+  }
+
+  Future<void> _finishPlayback(String message) async {
+    if (!isPlaying) return;
+
+    await _completeSubscription?.cancel();
+    _completeSubscription = null;
+
+    final shouldResume = _resumeListeningAfterPlayback;
+    _resumeListeningAfterPlayback = false;
+
+    if (mounted) {
+      setState(() {
+        isPlaying = false;
+        status = message;
+      });
+    }
+
+    // فقط اگر پیش از پخش شنود فعال بوده، آن را خودکار شروع می‌کنیم.
+    if (shouldResume && mounted) {
+      await startListening();
     }
   }
 
@@ -184,7 +208,11 @@ class _CrowHomePageState extends State<CrowHomePage> {
       await stopListening();
     }
 
-    await _player.stop();
+    if (isPlaying) {
+      await _player.stop();
+      await _completeSubscription?.cancel();
+      _completeSubscription = null;
+    }
 
     if (!mounted) return;
 
@@ -239,9 +267,17 @@ class _CrowHomePageState extends State<CrowHomePage> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                isRunning ? Icons.hearing : Icons.hearing_disabled,
+                isPlaying
+                    ? Icons.volume_up
+                    : isRunning
+                        ? Icons.hearing
+                        : Icons.hearing_disabled,
                 size: 80,
-                color: isRunning ? Colors.green : Colors.grey,
+                color: isPlaying
+                    ? Colors.orange
+                    : isRunning
+                        ? Colors.green
+                        : Colors.grey,
               ),
               const SizedBox(height: 24),
               Text(
@@ -250,6 +286,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
                 style: const TextStyle(fontSize: 18),
               ),
               const SizedBox(height: 32),
+
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -258,6 +295,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
                 ),
               ),
               const SizedBox(height: 12),
+
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -270,14 +308,29 @@ class _CrowHomePageState extends State<CrowHomePage> {
                 ),
               ),
               const SizedBox(height: 12),
+
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: isPlaying ? null : playRandomSound,
-                  child: const Text('پخش صدای آزمایشی'),
+                  child: const Text('پخش تصادفی'),
                 ),
               ),
               const SizedBox(height: 12),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: isPlaying ? stopPlayback : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.deepOrange,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('قطع پخش'),
+                ),
+              ),
+              const SizedBox(height: 12),
+
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(

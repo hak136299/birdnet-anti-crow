@@ -81,7 +81,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   int _consecutiveCrowDetections = 0;
 
-  // جلوگیری از پخش مکرر تا وقتی زنجیره تشخیص کلاغ قطع نشده است.
+  // جلوگیری از پخش مجدد تا زمانی که تشخیص کلاغ قطع شود.
   bool _crowTriggerLatched = false;
 
   String status = 'برنامه متوقف است';
@@ -163,7 +163,10 @@ class _CrowHomePageState extends State<CrowHomePage> {
     );
   }
 
-  Future<void> startListening() async {
+  // preserveCrowLatch برای شروع شنود بعد از پخش خودکار است.
+  Future<void> startListening({
+    bool preserveCrowLatch = false,
+  }) async {
     if (isRunning || isPlaying || _closing) return;
 
     try {
@@ -182,8 +185,11 @@ class _CrowHomePageState extends State<CrowHomePage> {
       }
 
       _pendingAudioBytes.clear();
-      _consecutiveCrowDetections = 0;
-      _crowTriggerLatched = false;
+
+      if (!preserveCrowLatch) {
+        _consecutiveCrowDetections = 0;
+        _crowTriggerLatched = false;
+      }
 
       final audioStream = await _recorder.startStream(
         const RecordConfig(
@@ -345,6 +351,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
       final lines = <String>[];
 
+      // نمایش پنج گونه با بالاترین امتیاز.
       for (final index in indexes.take(5)) {
         final confidence =
             (scores[index] * 100).clamp(0.0, 100.0);
@@ -367,6 +374,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
       if (crowDetected) {
         _consecutiveCrowDetections++;
       } else {
+        // زنجیره تشخیص قطع شد؛ اجازه تشخیص جدید داده می‌شود.
         _consecutiveCrowDetections = 0;
         _crowTriggerLatched = false;
       }
@@ -376,8 +384,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
       setState(() {
         detectionText = lines.join('\n');
         status = crowDetected
-            ? 'کلاغ شناسایی شد '
-                '(${_consecutiveCrowDetections}/2)'
+            ? 'کلاغ شناسایی شد ($_consecutiveCrowDetections/2)'
             : 'تحلیل انجام شد؛ کلاغ تأیید نشد';
       });
 
@@ -458,9 +465,61 @@ class _CrowHomePageState extends State<CrowHomePage> {
       });
     }
 
+    // پس از پخش خودکار، وضعیت قفل تشخیص حفظ می‌شود.
+    // اگر شنود قبلاً فعال نبوده، دوباره شروع نمی‌شود.
     if (shouldResume && mounted && !_closing) {
-      await startListening();
+      await startListening(preserveCrowLatch: true);
     }
+  }
+
+  void showAboutDialogBox() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1C2A33),
+        title: const Column(
+          children: [
+            Text(
+              'HAKnet',
+              style: TextStyle(
+                fontSize: 30,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 2.5,
+                color: Colors.greenAccent,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text('درباره برنامه'),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'ضد کلاغ حاج اصغر',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text('نسخه 1.0.0'),
+            SizedBox(height: 8),
+            Text(
+              'سازنده: حسین عبدالهی خسروشاهی',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('بستن'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> exitApp() async {
@@ -540,6 +599,27 @@ class _CrowHomePageState extends State<CrowHomePage> {
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
+              // نام HAKnet در گوشه بالای صفحه اصلی
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'HAKnet',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 2,
+                    color: Colors.greenAccent,
+                    shadows: [
+                      Shadow(
+                        color: Color(0x8000FF80),
+                        blurRadius: 8,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+
               Icon(
                 isPlaying
                     ? Icons.volume_up_rounded
@@ -554,6 +634,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
                         : Colors.grey,
               ),
               const SizedBox(height: 8),
+
               Text(
                 status,
                 textAlign: TextAlign.center,
@@ -604,7 +685,6 @@ class _CrowHomePageState extends State<CrowHomePage> {
                             _crowThreshold =
                                 double.parse(value.toStringAsFixed(2));
 
-                            // تغییر آستانه، زنجیره قبلی را ادامه نمی‌دهد.
                             _consecutiveCrowDetections = 0;
                             _crowTriggerLatched = false;
                           });
@@ -627,6 +707,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
               ),
 
               const SizedBox(height: 8),
+
               Expanded(
                 child: Container(
                   width: double.infinity,
@@ -648,12 +729,15 @@ class _CrowHomePageState extends State<CrowHomePage> {
                   ),
                 ),
               ),
+
               const SizedBox(height: 10),
 
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: isRunning || isPlaying ? null : startListening,
+                  onPressed: isRunning || isPlaying
+                      ? null
+                      : startListening,
                   icon: const Icon(Icons.hearing),
                   label: const Text('شروع شنود'),
                 ),
@@ -694,6 +778,16 @@ class _CrowHomePageState extends State<CrowHomePage> {
                   ),
                   icon: const Icon(Icons.stop_circle),
                   label: const Text('قطع پخش'),
+                ),
+              ),
+              const SizedBox(height: 6),
+
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: showAboutDialogBox,
+                  icon: const Icon(Icons.info_outline),
+                  label: const Text('دربارهٔ برنامه'),
                 ),
               ),
               const SizedBox(height: 6),

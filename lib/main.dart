@@ -349,16 +349,23 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
       indexes.sort((a, b) => scores[b].compareTo(scores[a]));
 
+      // فقط گونه‌هایی نمایش داده می‌شوند که امتیازشان
+      // بیشتر از آستانه تشخیص باشد.
       final lines = <String>[];
 
-      // نمایش پنج گونه با بالاترین امتیاز.
-      for (final index in indexes.take(5)) {
+      for (final index in indexes) {
+        if (scores[index] <= _crowThreshold) continue;
+
         final confidence =
             (scores[index] * 100).clamp(0.0, 100.0);
 
         lines.add(
           '${_labels[index]} — ${confidence.toStringAsFixed(1)}٪',
         );
+      }
+
+      if (lines.isEmpty) {
+        lines.add('گونه‌ای بالاتر از آستانه تشخیص نیست');
       }
 
       var crowDetected = false;
@@ -642,7 +649,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
               ),
               const SizedBox(height: 8),
 
-              // تنظیم آستانه تشخیص کلاغ
+              // تنظیم آستانه تشخیص
               Card(
                 color: const Color(0xFF1C2A33),
                 child: Padding(
@@ -653,10 +660,12 @@ class _CrowHomePageState extends State<CrowHomePage> {
                   child: Column(
                     children: [
                       Row(
+                        textDirection: TextDirection.rtl,
                         children: [
                           const Expanded(
                             child: Text(
-                              'آستانه اطمینان تشخیص کلاغ',
+                              'آستانه اطمینان تشخیص',
+                              textAlign: TextAlign.right,
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 14,
@@ -665,6 +674,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
                           ),
                           Text(
                             '${(_crowThreshold * 100).round()}٪',
+                            textAlign: TextAlign.left,
                             style: const TextStyle(
                               fontWeight: FontWeight.w900,
                               color: Colors.greenAccent,
@@ -718,13 +728,30 @@ class _CrowHomePageState extends State<CrowHomePage> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: SingleChildScrollView(
-                    child: Text(
-                      'گونه‌های شناسایی‌شده:\n\n$detectionText',
-                      textAlign: TextAlign.start,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        height: 1.7,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Text(
+                          'گونه‌های شناسایی‌شده',
+                          textAlign: TextAlign.right,
+                          textDirection: TextDirection.rtl,
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.greenAccent,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          detectionText,
+                          textAlign: TextAlign.right,
+                          textDirection: TextDirection.rtl,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            height: 1.7,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

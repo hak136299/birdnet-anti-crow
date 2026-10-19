@@ -1,11 +1,11 @@
-
-name: Build Simple Android App
+name: Build AntiCrow Android App
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   build:
@@ -59,9 +59,52 @@ jobs:
       - name: Create Android project files
         run: flutter create --platforms=android --project-name simple_android_app .
 
+      - name: Configure AntiCrow name and icon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: AndroidManifest.xml not found"
+            exit 1
+          fi
+
+          if [ ! -f assets/icon.png ]; then
+            echo "ERROR: assets/icon.png not found"
+            exit 1
+          fi
+
+          sed -i 's/android:label="[^"]*"/android:label="AntiCrow"/' "$MANIFEST"
+
+          RES="android/app/src/main/res"
+
+          # Remove adaptive icon definitions so the PNG icons below are used.
+          rm -f "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          rm -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
+
+          # Generate launcher icons at Android's standard resolutions.
+          for entry in "mdpi:48" "hdpi:72" "xhdpi:96" "xxhdpi:144" "xxxhdpi:192"; do
+            density="${entry%%:*}"
+            size="${entry##*:}"
+
+            mkdir -p "$RES/mipmap-$density"
+
+            convert assets/icon.png \
+              -resize "${size}x${size}!" \
+              "$RES/mipmap-$density/ic_launcher.png"
+
+            convert assets/icon.png \
+              -resize "${size}x${size}!" \
+              "$RES/mipmap-$density/ic_launcher_round.png"
+          done
+
+          echo "AntiCrow app label and launcher icons configured."
+          grep 'android:label=' "$MANIFEST"
+
       - name: Show Android release configuration
         run: |
-          echo "Checking generated Gradle configuration..."
           if [ -f android/app/build.gradle.kts ]; then
             cat android/app/build.gradle.kts
           elif [ -f android/app/build.gradle ]; then
@@ -87,11 +130,38 @@ jobs:
         run: flutter pub deps
 
       - name: Build APK
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release
+
+          cp build/app/outputs/flutter-apk/app-release.apk AntiCrow.apk
+
+          ls -lh AntiCrow.apk
 
       - name: Upload APK
+        id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: simple-android-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: AntiCrow-APK
+          path: AntiCrow.apk
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Delete previous AntiCrow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          echo "New artifact ID: $NEW_ARTIFACT_ID"
+
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.name == \"AntiCrow-APK\" and (.id | tostring) != \"${NEW_ARTIFACT_ID}\") | .id" |
+          while read -r id; do
+            if [ -n "$id" ]; then
+              echo "Deleting old artifact ID: $id"
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+            fi
+          done
+
+          echo "Previous AntiCrow artifacts cleanup completed."

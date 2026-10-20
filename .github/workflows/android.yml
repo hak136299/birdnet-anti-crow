@@ -164,6 +164,21 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+     
+      - name: Inspect file_picker Gradle configuration
+        run: |
+          echo "=== Pub cache location ==="
+          echo "$HOME/.pub-cache"
+
+          echo "=== Locate file_picker Gradle files ==="
+          find "$HOME/.pub-cache" -path '*file_picker*/android/build.gradle*' -type f -print
+
+          echo "=== Locate compileSdk declarations ==="
+          grep -R -n -E 'compileSdk|compileSdkVersion' \
+            "$HOME/.pub-cache/hosted/pub.dev"/file_picker-*/android/ \
+            --include='build.gradle' \
+            --include='build.gradle.kts' || true
+
       - name: Verify dependencies
         run: flutter pub deps
 

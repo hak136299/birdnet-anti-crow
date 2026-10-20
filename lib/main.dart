@@ -1,13 +1,32 @@
-
 import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+
+class _SoundItem {
+  const _SoundItem({
+    required this.title,
+    required this.source,
+    required this.isAsset,
+    this.filePath,
+  });
+
+  final String title;
+  final String source;
+  final bool isAsset;
+  final String? filePath;
+
+  Source toPlayerSource() =>
+      isAsset ? AssetSource(source) : DeviceFileSource(source);
+}
 
 void main() {
   runApp(const CrowApp());
@@ -58,6 +77,9 @@ class _CrowHomePageState extends State<CrowHomePage> {
   static const double _minThreshold = 0.10;
   static const double _maxThreshold = 0.95;
   static const double _thresholdStep = 0.05;
+  static const int _defaultRequiredCrowDetections = 2;
+  static const int _minRequiredCrowDetections = 1;
+  static const int _maxRequiredCrowDetections = 5;
 
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
@@ -68,6 +90,9 @@ class _CrowHomePageState extends State<CrowHomePage> {
   StreamSubscription<void>? _completeSubscription;
 
   final List<int> _pendingAudioBytes = [];
+  final List<File> _importedSoundFiles = [];
+  Directory? _importedSoundsDirectory;
+  Timer? _playbackTimer;
   List<String> _labels = [];
 
   double _crowThreshold = 0.35;
@@ -80,12 +105,226 @@ class _CrowHomePageState extends State<CrowHomePage> {
   bool _closing = false;
 
   int _consecutiveCrowDetections = 0;
+  int _requiredCrowDetections = _defaultRequiredCrowDetections;
 
   // جلوگیری از پخش مجدد تا زمانی که تشخیص کلاغ قطع شود.
   bool _crowTriggerLatched = false;
 
   String status = 'برنامه متوقف است';
   String detectionText = 'هنوز تحلیلی انجام نشده است';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadImportedSounds());
+  }
+
+  Future<void> _loadImportedSounds() async {
+    try {
+      final appDirectory = await getApplicationDocumentsDirectory();
+      final directory = Directory('${appDirectory.path}/imported_sounds');
+      if (!await directory.exists()) {
+        await directory.create(recursive: true);
+      }
+      final files = directory
+          .listSync()
+          .whereType<File>()
+          .where((file) {
+            final name = file.path.toLowerCase();
+            return name.endsWith('.wav') ||
+                name.endsWith('.mp3') ||
+                name.endsWith('.m4a') ||
+                name.endsWith('.aac') ||
+                name.endsWith('.ogg') ||
+                name.endsWith('.flac') ||
+                name.endsWith('.opus');
+          })
+          .toList()
+        ..sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+      _importedSoundsDirectory = directory;
+      if (mounted) {
+        setState(() {
+          _importedSoundFiles
+            ..clear()
+            ..addAll(files);
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => status = 'خطا در بارگذاری فایل‌های صوتی: $e');
+      }
+    }
+  }
+
+  String _fileName(File file) {
+    return file.path.split(Platform.pathSeparator).last;
+  }
+
+  Future<void> importAudioFiles({VoidCallback? onUpdated}) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.audio,
+        allowMultiple: true,
+        withData: false,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final appDirectory = await getApplicationDocumentsDirectory();
+      final directory = _importedSoundsDirectory ??
+          Directory('${appDirectory.path}/imported_sounds');
+      if (!await directory.exists()) {
+        await directory.create(recursive: true);
+      }
+      var copied = 0;
+      for (final picked in result.files) {
+        final path = picked.path;
+        if (path == null) continue;
+        final lower = path.toLowerCase();
+        final supported = ['.wav', '.mp3', '.m4a', '.aac', '.ogg', '.flac', '.opus']
+            .any(lower.endsWith);
+        if (!supported) continue;
+
+        final originalName = picked.name.replaceAll(
+          RegExp(r'[^a-zA-Z0-9._-]'),
+          '_',
+        );
+        final destination = File(
+          '${directory.path}/${DateTime.now().microsecondsSinceEpoch}_$originalName',
+        );
+        await File(path).copy(destination.path);
+        copied++;
+      }
+      await _loadImportedSounds();
+      onUpdated?.call();
+      if (mounted) {
+        setState(() {
+          status = copied > 0
+              ? '$copied فایل صوتی وارد شد'
+              : 'فایل صوتی پشتیبانی‌شده انتخاب نشد';
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => status = 'خطا در واردکردن صدا: $e');
+    }
+  }
+
+  List<_SoundItem> _availableSounds() {
+    final sounds = <_SoundItem>[
+      for (var number = 1; number <= 30; number++)
+        _SoundItem(
+          title: 'صدای پیش‌فرض $number',
+          source: 'sounds/$number.wav',
+          isAsset: true,
+        ),
+    ];
+    for (final file in _importedSoundFiles) {
+      sounds.add(
+        _SoundItem(
+          title: _fileName(file),
+          source: file.path,
+          filePath: file.path,
+          isAsset: false,
+        ),
+      );
+    }
+    return sounds;
+  }
+
+  Future<void> deleteImportedSound(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+      if (mounted) {
+        setState(() {
+          _importedSoundFiles.removeWhere(
+            (item) => item.path == file.path,
+          );
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => status = 'خطا در حذف فایل: $e');
+    }
+  }
+
+  Future<void> showAudioManager() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, refreshDialog) => AlertDialog(
+          backgroundColor: const Color(0xFF1C2A33),
+          title: const Text('مدیریت فایل‌های صوتی'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 300,
+            child: _importedSoundFiles.isEmpty
+                ? const Center(
+                    child: Text('هنوز صدایی از گوشی وارد نشده است.'),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _importedSoundFiles.length,
+                    itemBuilder: (context, index) {
+                      final file = _importedSoundFiles[index];
+                      return ListTile(
+                        dense: true,
+                        title: Text(
+                          _fileName(file),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        leading: const Icon(Icons.audiotrack),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'پیش‌شنیدن',
+                              icon: const Icon(Icons.play_arrow),
+                              onPressed: isPlaying
+                                  ? null
+                                  : () async {
+                                      Navigator.pop(dialogContext);
+                                      await _playSpecificSound(
+                                        _SoundItem(
+                                          title: _fileName(file),
+                                          source: file.path,
+                                          filePath: file.path,
+                                          isAsset: false,
+                                        ),
+                                      );
+                                    },
+                            ),
+                            IconButton(
+                              tooltip: 'حذف',
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () async {
+                                await deleteImportedSound(file);
+                                refreshDialog(() {});
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () async {
+                await importAudioFiles(
+                  onUpdated: () => refreshDialog(() {}),
+                );
+              },
+              icon: const Icon(Icons.add),
+              label: const Text('افزودن از گوشی'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('بستن'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Future<void> _initializeModel() async {
     if (_modelReady) return;
@@ -391,12 +630,12 @@ class _CrowHomePageState extends State<CrowHomePage> {
       setState(() {
         detectionText = lines.join('\n');
         status = crowDetected
-            ? 'کلاغ شناسایی شد ($_consecutiveCrowDetections/2)'
+            ? 'کلاغ شناسایی شد ($_consecutiveCrowDetections/$_requiredCrowDetections)'
             : 'تحلیل انجام شد؛ کلاغ تأیید نشد';
       });
 
       if (crowDetected &&
-          _consecutiveCrowDetections >= 2 &&
+          _consecutiveCrowDetections >= _requiredCrowDetections &&
           !_crowTriggerLatched &&
           isRunning &&
           !isPlaying) {
@@ -415,32 +654,60 @@ class _CrowHomePageState extends State<CrowHomePage> {
   }
 
   Future<void> playRandomSound() async {
+    final sounds = _availableSounds();
+    if (sounds.isEmpty) return;
+    final selected = sounds[Random().nextInt(sounds.length)];
+    await _playSpecificSound(selected);
+  }
+
+  Future<void> _playSpecificSound(_SoundItem sound) async {
     if (isPlaying || _closing) return;
 
     _resumeListeningAfterPlayback = isRunning;
-
     if (_resumeListeningAfterPlayback) {
       await stopListening();
     }
 
     try {
-      final number = Random().nextInt(30) + 1;
-
       await _completeSubscription?.cancel();
       _completeSubscription = null;
+      _playbackTimer?.cancel();
+      _playbackTimer = null;
 
       if (!mounted || _closing) return;
 
       setState(() {
         isPlaying = true;
-        status = 'در حال پخش فایل شماره $number';
+        status = 'در حال پخش ${sound.title}';
       });
 
       _completeSubscription = _player.onPlayerComplete.listen((_) {
         unawaited(_finishPlayback('پخش صدا تمام شد'));
       });
 
-      await _player.play(AssetSource('sounds/$number.wav'));
+      // شنونده مدت فایل پیش از شروع پخش ثبت می‌شود.
+      final durationFuture = _player.onDurationChanged.first;
+      await _player.play(sound.toPlayerSource());
+
+      try {
+        final duration = await durationFuture.timeout(
+          const Duration(seconds: 4),
+        );
+        if (duration.inMilliseconds > 0 && duration.inSeconds >= 20) {
+          // برای فایل‌های ۲۰ ثانیه و بیشتر، ۲۰ تا ۱۰۰ درصد انتخاب می‌شود.
+          final percent = 20 + Random().nextInt(81);
+          final playDuration = Duration(
+            milliseconds: (duration.inMilliseconds * percent / 100).round(),
+          );
+          if (percent < 100) {
+            _playbackTimer = Timer(playDuration, () {
+              unawaited(stopPlayback());
+            });
+          }
+        }
+      } catch (_) {
+        // اگر دستگاه مدت فایل را گزارش نکند، فایل تا پایان کامل پخش می‌شود.
+      }
     } catch (e) {
       await _finishPlayback('خطا در پخش صدا: $e');
     }
@@ -448,6 +715,11 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   Future<void> stopPlayback() async {
     if (!isPlaying) return;
+
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    _consecutiveCrowDetections = 0;
+    _crowTriggerLatched = false;
 
     try {
       await _player.stop();
@@ -459,6 +731,8 @@ class _CrowHomePageState extends State<CrowHomePage> {
   Future<void> _finishPlayback(String message) async {
     if (!isPlaying) return;
 
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
     await _completeSubscription?.cancel();
     _completeSubscription = null;
 
@@ -535,6 +809,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
     }
 
     _closing = true;
+    _playbackTimer?.cancel();
 
     try {
       await _player.stop();
@@ -574,6 +849,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   @override
   void dispose() {
+    _playbackTimer?.cancel();
     _audioSubscription?.cancel();
     _completeSubscription?.cancel();
     _session?.close();
@@ -700,6 +976,41 @@ class _CrowHomePageState extends State<CrowHomePage> {
                           });
                         },
                       ),
+                      const SizedBox(height: 4),
+                      Row(
+                        textDirection: TextDirection.rtl,
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'تعداد تشخیص متوالی کلاغ',
+                              textAlign: TextAlign.right,
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          DropdownButton<int>(
+                            value: _requiredCrowDetections,
+                            dropdownColor: const Color(0xFF1C2A33),
+                            items: List.generate(
+                              _maxRequiredCrowDetections,
+                              (index) => DropdownMenuItem<int>(
+                                value: index + 1,
+                                child: Text('${index + 1} بار'),
+                              ),
+                            ),
+                            onChanged: (value) {
+                              if (value == null) return;
+                              setState(() {
+                                _requiredCrowDetections = value;
+                                _consecutiveCrowDetections = 0;
+                                _crowTriggerLatched = false;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
                       const Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -785,13 +1096,24 @@ class _CrowHomePageState extends State<CrowHomePage> {
               ),
               const SizedBox(height: 6),
 
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: isPlaying ? null : playRandomSound,
-                  icon: const Icon(Icons.shuffle),
-                  label: const Text('پخش تصادفی'),
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: isPlaying ? null : playRandomSound,
+                      icon: const Icon(Icons.shuffle),
+                      label: const Text('پخش تصادفی'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: showAudioManager,
+                      icon: const Icon(Icons.library_music),
+                      label: const Text('مدیریت صداها'),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 6),
 
@@ -834,4 +1156,3 @@ class _CrowHomePageState extends State<CrowHomePage> {
     );
   }
 }
-

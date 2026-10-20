@@ -59,6 +59,23 @@ jobs:
       - name: Create Android project files
         run: flutter create --platforms=android --project-name simple_android_app .
 
+      - name: Set Android compile SDK
+        run: |
+          GRADLE="android/app/build.gradle.kts"
+
+          if [ -f "$GRADLE" ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' "$GRADLE"
+          else
+            GRADLE="android/app/build.gradle"
+            if [ ! -f "$GRADLE" ]; then
+              echo "ERROR: Gradle file not found"
+              exit 1
+            fi
+            sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 36/' "$GRADLE"
+          fi
+
+          grep -n 'compileSdk' "$GRADLE"
+
       - name: Configure AntiCrow name and icon
         run: |
           sudo apt-get update

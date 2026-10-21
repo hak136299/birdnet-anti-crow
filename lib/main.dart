@@ -789,6 +789,8 @@ class _CrowHomePageState extends State<CrowHomePage> {
   }
 
   void showSettingsDialog() {
+    final thresholdSteps =
+      ((_maxThreshold - _minThreshold) / _thresholdStep).round();
     showDialog<void>(
       context: context,
       builder: (dialogContext) => Directionality(

@@ -5,28 +5,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:record/record.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
-
-class _SoundItem {
-  const _SoundItem({
-    required this.title,
-    required this.source,
-    required this.isAsset,
-    this.filePath,
-  });
-
-  final String title;
-  final String source;
-  final bool isAsset;
-  final String? filePath;
-
-  Source toPlayerSource() =>
-      isAsset ? AssetSource(source) : DeviceFileSource(source);
-}
 
 void main() {
   runApp(const CrowApp());
@@ -42,10 +25,10 @@ class CrowApp extends StatelessWidget {
       title: 'ضد کلاغ حاج اصغر',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00A878),
+          seedColor: const Color(0xFF20C7B5),
           brightness: Brightness.dark,
         ),
-        scaffoldBackgroundColor: const Color(0xFF101820),
+        scaffoldBackgroundColor: const Color(0xFF071923),
         useMaterial3: true,
       ),
       home: const CrowHomePage(),
@@ -77,9 +60,6 @@ class _CrowHomePageState extends State<CrowHomePage> {
   static const double _minThreshold = 0.10;
   static const double _maxThreshold = 0.95;
   static const double _thresholdStep = 0.05;
-  static const int _defaultRequiredCrowDetections = 2;
-  static const int _minRequiredCrowDetections = 1;
-  static const int _maxRequiredCrowDetections = 5;
 
   final AudioRecorder _recorder = AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
@@ -88,11 +68,11 @@ class _CrowHomePageState extends State<CrowHomePage> {
   OrtSession? _session;
   StreamSubscription<Uint8List>? _audioSubscription;
   StreamSubscription<void>? _completeSubscription;
+  Timer? _playbackTimer;
+  final List<File> _importedSounds = [];
+  String? _currentImportedPath;
 
   final List<int> _pendingAudioBytes = [];
-  final List<File> _importedSoundFiles = [];
-  Directory? _importedSoundsDirectory;
-  Timer? _playbackTimer;
   List<String> _labels = [];
 
   double _crowThreshold = 0.35;
@@ -105,7 +85,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
   bool _closing = false;
 
   int _consecutiveCrowDetections = 0;
-  int _requiredCrowDetections = _defaultRequiredCrowDetections;
+  int _requiredCrowDetections = 2;
 
   // جلوگیری از پخش مجدد تا زمانی که تشخیص کلاغ قطع شود.
   bool _crowTriggerLatched = false;
@@ -119,208 +99,154 @@ class _CrowHomePageState extends State<CrowHomePage> {
     unawaited(_loadImportedSounds());
   }
 
+  Future<Directory> _soundDirectory() async {
+    final appDir = await getApplicationDocumentsDirectory();
+    final dir = Directory('${appDir.path}${Platform.pathSeparator}imported_sounds');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
   Future<void> _loadImportedSounds() async {
     try {
-      final appDirectory = await getApplicationDocumentsDirectory();
-      final directory = Directory('${appDirectory.path}/imported_sounds');
-      if (!await directory.exists()) {
-        await directory.create(recursive: true);
-      }
-      final files = directory
+      final dir = await _soundDirectory();
+      final files = dir
           .listSync()
           .whereType<File>()
-          .where((file) {
-            final name = file.path.toLowerCase();
-            return name.endsWith('.wav') ||
-                name.endsWith('.mp3') ||
-                name.endsWith('.m4a') ||
-                name.endsWith('.aac') ||
-                name.endsWith('.ogg') ||
-                name.endsWith('.flac') ||
-                name.endsWith('.opus');
-          })
-          .toList()
-        ..sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
-      _importedSoundsDirectory = directory;
-      if (mounted) {
-        setState(() {
-          _importedSoundFiles
-            ..clear()
-            ..addAll(files);
-        });
-      }
+          .where((f) => _isAudioFile(f.path))
+          .toList();
+      files.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+      if (mounted) setState(() {
+        _importedSounds
+          ..clear()
+          ..addAll(files);
+      });
     } catch (e) {
-      if (mounted) {
-        setState(() => status = 'خطا در بارگذاری فایل‌های صوتی: $e');
-      }
+      if (mounted) setState(() => status = 'خطا در خواندن فایل‌های صوتی: $e');
     }
   }
 
-  String _fileName(File file) {
-    return file.path.split(Platform.pathSeparator).last;
-  }
+  bool _isAudioFile(String path) => path.toLowerCase().endsWith('.wav');
 
-  Future<void> importAudioFiles({VoidCallback? onUpdated}) async {
+  Future<void> _importAudioFiles() async {
     try {
       final result = await FilePicker.platform.pickFiles(
-        type: FileType.audio,
-        allowMultiple: true,
+        type: FileType.custom,
+        allowedExtensions: const ['wav'],
+        allowMultiple: false,
         withData: false,
       );
       if (result == null || result.files.isEmpty) return;
 
-      final appDirectory = await getApplicationDocumentsDirectory();
-      final directory = _importedSoundsDirectory ??
-          Directory('${appDirectory.path}/imported_sounds');
-      if (!await directory.exists()) {
-        await directory.create(recursive: true);
+      final picked = result.files.first;
+      final sourcePath = picked.path;
+      if (sourcePath == null || sourcePath.isEmpty || !_isAudioFile(sourcePath)) {
+        if (mounted) setState(() => status = 'فقط فایل WAV قابل افزودن است');
+        return;
       }
-      var copied = 0;
-      for (final picked in result.files) {
-        final path = picked.path;
-        if (path == null) continue;
-        final lower = path.toLowerCase();
-        final supported = ['.wav', '.mp3', '.m4a', '.aac', '.ogg', '.flac', '.opus']
-            .any(lower.endsWith);
-        if (!supported) continue;
+      final source = File(sourcePath);
+      if (!await source.exists()) return;
 
-        final originalName = picked.name.replaceAll(
-          RegExp(r'[^a-zA-Z0-9._-]'),
-          '_',
-        );
-        final destination = File(
-          '${directory.path}/${DateTime.now().microsecondsSinceEpoch}_$originalName',
-        );
-        await File(path).copy(destination.path);
-        copied++;
+      final dir = await _soundDirectory();
+      // فایل‌های واردشده با شماره 1 تا 30 ذخیره می‌شوند؛ شماره حذف‌شده آزاد می‌شود.
+      final used = <int>{};
+      for (final file in dir.listSync().whereType<File>()) {
+        final match = RegExp(r'^(\d+)\.wav$', caseSensitive: false)
+            .firstMatch(file.uri.pathSegments.last);
+        final number = match == null ? null : int.tryParse(match.group(1)!);
+        if (number != null && number >= 1 && number <= 30) used.add(number);
       }
+      var slot = 1;
+      while (used.contains(slot) && slot <= 30) { slot++; }
+      if (slot > 30) {
+        if (mounted) setState(() => status = 'هر ۳۰ شماره پر است؛ ابتدا یکی از فایل‌های شماره‌دار را حذف کنید');
+        return;
+      }
+      await source.copy('${dir.path}${Platform.pathSeparator}$slot.wav');
       await _loadImportedSounds();
-      onUpdated?.call();
-      if (mounted) {
-        setState(() {
-          status = copied > 0
-              ? '$copied فایل صوتی وارد شد'
-              : 'فایل صوتی پشتیبانی‌شده انتخاب نشد';
-        });
-      }
+      if (mounted) setState(() => status = 'فایل جدید با نام $slot.wav ذخیره شد');
     } catch (e) {
-      if (mounted) setState(() => status = 'خطا در واردکردن صدا: $e');
+      if (mounted) setState(() => status = 'خطا در افزودن فایل WAV: $e');
     }
   }
 
-  List<_SoundItem> _availableSounds() {
-    final sounds = <_SoundItem>[
-      for (var number = 1; number <= 30; number++)
-        _SoundItem(
-          title: 'صدای پیش‌فرض $number',
-          source: 'sounds/$number.wav',
-          isAsset: true,
-        ),
-    ];
-    for (final file in _importedSoundFiles) {
-      sounds.add(
-        _SoundItem(
-          title: _fileName(file),
-          source: file.path,
-          filePath: file.path,
-          isAsset: false,
-        ),
-      );
-    }
-    return sounds;
-  }
-
-  Future<void> deleteImportedSound(File file) async {
+  Future<void> _deleteImportedSound(File file, StateSetter dialogSetState) async {
+    if (_currentImportedPath == file.path && isPlaying) await stopPlayback();
     try {
-      if (await file.exists()) await file.delete();
-      if (mounted) {
-        setState(() {
-          _importedSoundFiles.removeWhere(
-            (item) => item.path == file.path,
-          );
-        });
-      }
+      await file.delete();
+      await _loadImportedSounds();
+      dialogSetState(() {});
     } catch (e) {
       if (mounted) setState(() => status = 'خطا در حذف فایل: $e');
     }
   }
 
+  Future<void> _previewImportedSound(File file) async {
+    if (isPlaying) await stopPlayback();
+    await _playSource(DeviceFileSource(file.path), label: file.uri.pathSegments.last, importedPath: file.path);
+  }
+
   Future<void> showAudioManager() async {
+    await _loadImportedSounds();
+    if (!mounted) return;
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, refreshDialog) => AlertDialog(
+        builder: (context, dialogSetState) => AlertDialog(
           backgroundColor: const Color(0xFF1C2A33),
-          title: const Text('مدیریت فایل‌های صوتی'),
+          title: const Text('مدیریت فایل‌های صوتی', textAlign: TextAlign.center),
           content: SizedBox(
             width: double.maxFinite,
-            height: 300,
-            child: _importedSoundFiles.isEmpty
-                ? const Center(
-                    child: Text('هنوز صدایی از گوشی وارد نشده است.'),
-                  )
-                : ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: _importedSoundFiles.length,
-                    itemBuilder: (context, index) {
-                      final file = _importedSoundFiles[index];
-                      return ListTile(
-                        dense: true,
-                        title: Text(
-                          _fileName(file),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        leading: const Icon(Icons.audiotrack),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'پیش‌شنیدن',
-                              icon: const Icon(Icons.play_arrow),
-                              onPressed: isPlaying
-                                  ? null
-                                  : () async {
-                                      Navigator.pop(dialogContext);
-                                      await _playSpecificSound(
-                                        _SoundItem(
-                                          title: _fileName(file),
-                                          source: file.path,
-                                          filePath: file.path,
-                                          isAsset: false,
-                                        ),
-                                      );
-                                    },
-                            ),
-                            IconButton(
-                              tooltip: 'حذف',
-                              icon: const Icon(Icons.delete_outline),
-                              onPressed: () async {
-                                await deleteImportedSound(file);
-                                refreshDialog(() {});
-                              },
-                            ),
-                          ],
-                        ),
-                      );
+            height: 360,
+            child: Column(
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      await _importAudioFiles();
+                      dialogSetState(() {});
                     },
+                    icon: const Icon(Icons.add),
+                    label: const Text('افزودن فایل از گوشی'),
                   ),
+                ),
+                const SizedBox(height: 8),
+                const Text('فقط فایل WAV پذیرفته می‌شود. برای بارگذاری فایل جدید، یک فایل شماره‌دار قبلی را حذف کنید؛ سپس فایل جدید شمارهٔ آزادشده را می‌گیرد (مثلاً 7.wav).', textAlign: TextAlign.center, style: TextStyle(color: Colors.greenAccent, fontSize: 12)),
+                const SizedBox(height: 6),
+                Expanded(
+                  child: _importedSounds.isEmpty
+                      ? const Center(child: Text('فایل WAV شماره‌دار اضافه نشده است'))
+                      : ListView.builder(
+                          itemCount: _importedSounds.length,
+                          itemBuilder: (context, index) {
+                            final file = _importedSounds[index];
+                            final name = file.uri.pathSegments.last;
+                            return ListTile(
+                              dense: true,
+                              title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                              leading: IconButton(
+                                tooltip: 'پخش',
+                                icon: const Icon(Icons.play_arrow),
+                                onPressed: () async {
+                                  Navigator.of(context).pop();
+                                  await _previewImportedSound(file);
+                                },
+                              ),
+                              trailing: IconButton(
+                                tooltip: 'حذف',
+                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                                onPressed: () async {
+                                  await _deleteImportedSound(file, dialogSetState);
+                                },
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
-          actions: [
-            TextButton.icon(
-              onPressed: () async {
-                await importAudioFiles(
-                  onUpdated: () => refreshDialog(() {}),
-                );
-              },
-              icon: const Icon(Icons.add),
-              label: const Text('افزودن از گوشی'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('بستن'),
-            ),
-          ],
+          actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('بستن'))],
         ),
       ),
     );
@@ -446,7 +372,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
       setState(() {
         isRunning = true;
         status = 'شنود فعال است؛ در انتظار تحلیل صدا...';
-        detectionText = 'در حال دریافت صدا';
+        detectionText = 'در حال شنود و تحلیل صدا';
       });
 
       _audioSubscription = audioStream.listen(
@@ -507,6 +433,9 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
     _pendingAudioBytes.removeRange(0, _inputWindowBytes);
     _isAnalyzing = true;
+    if (mounted) {
+      setState(() => status = 'در حال تحلیل صدا...');
+    }
 
     unawaited(() async {
       try {
@@ -521,7 +450,14 @@ class _CrowHomePageState extends State<CrowHomePage> {
         }
       } finally {
         _isAnalyzing = false;
-
+        if (mounted) {
+          setState(() {
+            if (isRunning && !isPlaying && !_closing &&
+                status == 'در حال تحلیل صدا...') {
+              status = 'شنود فعال است؛ در انتظار تحلیل صدا...';
+            }
+          });
+        }
         if (isRunning && !isPlaying && !_closing) {
           _processNextWindow();
         }
@@ -654,19 +590,40 @@ class _CrowHomePageState extends State<CrowHomePage> {
   }
 
   Future<void> playRandomSound() async {
-    final sounds = _availableSounds();
-    if (sounds.isEmpty) return;
-    final selected = sounds[Random().nextInt(sounds.length)];
-    await _playSpecificSound(selected);
+    if (isPlaying || _closing) return;
+
+    final number = Random().nextInt(30) + 1;
+    // اگر کاربر WAV شماره‌دار وارد کرده باشد، همان فایل جایگزین صدای پیش‌فرض آن شماره می‌شود.
+    File? replacement;
+    for (final file in _importedSounds) {
+      if (file.uri.pathSegments.last.toLowerCase() == '$number.wav') {
+        replacement = file;
+        break;
+      }
+    }
+    if (replacement != null) {
+      await _playSource(
+        DeviceFileSource(replacement.path),
+        label: 'فایل شماره $number',
+        importedPath: replacement.path,
+      );
+    } else {
+      await _playSource(
+        AssetSource('sounds/$number.wav'),
+        label: 'فایل شماره $number',
+      );
+    }
   }
 
-  Future<void> _playSpecificSound(_SoundItem sound) async {
+  Future<void> _playSource(
+    Source source, {
+    required String label,
+    String? importedPath,
+  }) async {
     if (isPlaying || _closing) return;
 
     _resumeListeningAfterPlayback = isRunning;
-    if (_resumeListeningAfterPlayback) {
-      await stopListening();
-    }
+    if (_resumeListeningAfterPlayback) await stopListening();
 
     try {
       await _completeSubscription?.cancel();
@@ -678,35 +635,33 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
       setState(() {
         isPlaying = true;
-        status = 'در حال پخش ${sound.title}';
+        _currentImportedPath = importedPath;
+        status = 'در حال پخش $label';
       });
 
       _completeSubscription = _player.onPlayerComplete.listen((_) {
         unawaited(_finishPlayback('پخش صدا تمام شد'));
       });
 
-      // شنونده مدت فایل پیش از شروع پخش ثبت می‌شود.
-      final durationFuture = _player.onDurationChanged.first;
-      await _player.play(sound.toPlayerSource());
+      await _player.setSource(source);
+      final duration = await _player.getDuration();
+      if (!mounted || _closing || !isPlaying) return;
+      await _player.resume();
 
-      try {
-        final duration = await durationFuture.timeout(
-          const Duration(seconds: 4),
-        );
-        if (duration.inMilliseconds > 0 && duration.inSeconds >= 20) {
-          // برای فایل‌های ۲۰ ثانیه و بیشتر، ۲۰ تا ۱۰۰ درصد انتخاب می‌شود.
-          final percent = 20 + Random().nextInt(81);
+      // فایل‌های ۲۰ ثانیه یا بیشتر: پخش تصادفی ۲۰ تا ۱۰۰ درصد.
+      // فایل کوتاه‌تر از ۲۰ ثانیه: پخش کامل.
+      if (duration != null && duration.inSeconds >= 20) {
+        final percent = 20 + Random().nextInt(81);
+        if (percent < 100) {
           final playDuration = Duration(
-            milliseconds: (duration.inMilliseconds * percent / 100).round(),
+            milliseconds: duration.inMilliseconds * percent ~/ 100,
           );
-          if (percent < 100) {
-            _playbackTimer = Timer(playDuration, () {
-              unawaited(stopPlayback());
-            });
-          }
+          _playbackTimer = Timer(playDuration, () async {
+            if (!isPlaying || _closing) return;
+            try { await _player.stop(); } catch (_) {}
+            await _finishPlayback('پخش صدا تمام شد');
+          });
         }
-      } catch (_) {
-        // اگر دستگاه مدت فایل را گزارش نکند، فایل تا پایان کامل پخش می‌شود.
       }
     } catch (e) {
       await _finishPlayback('خطا در پخش صدا: $e');
@@ -716,10 +671,10 @@ class _CrowHomePageState extends State<CrowHomePage> {
   Future<void> stopPlayback() async {
     if (!isPlaying) return;
 
-    _playbackTimer?.cancel();
-    _playbackTimer = null;
     _consecutiveCrowDetections = 0;
     _crowTriggerLatched = false;
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
 
     try {
       await _player.stop();
@@ -729,10 +684,12 @@ class _CrowHomePageState extends State<CrowHomePage> {
   }
 
   Future<void> _finishPlayback(String message) async {
-    if (!isPlaying) return;
-
     _playbackTimer?.cancel();
     _playbackTimer = null;
+    if (!isPlaying) return;
+
+    _currentImportedPath = null;
+
     await _completeSubscription?.cancel();
     _completeSubscription = null;
 
@@ -809,13 +766,13 @@ class _CrowHomePageState extends State<CrowHomePage> {
     }
 
     _closing = true;
-    _playbackTimer?.cancel();
 
     try {
       await _player.stop();
     } catch (_) {}
 
     await _completeSubscription?.cancel();
+    _playbackTimer?.cancel();
 
     if (!mounted) return;
 
@@ -849,9 +806,9 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   @override
   void dispose() {
-    _playbackTimer?.cancel();
     _audioSubscription?.cancel();
     _completeSubscription?.cancel();
+    _playbackTimer?.cancel();
     _session?.close();
     _recorder.dispose();
     _player.dispose();
@@ -860,295 +817,254 @@ class _CrowHomePageState extends State<CrowHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final thresholdSteps =
-        ((_maxThreshold - _minThreshold) / _thresholdStep).round();
+    final thresholdSteps = ((_maxThreshold - _minThreshold) / _thresholdStep).round();
+    final Color stateColor = isPlaying
+        ? const Color(0xFFFFA447)
+        : _isAnalyzing
+            ? const Color(0xFF53A8FF)
+            : isRunning
+                ? const Color(0xFF35D6AE)
+                : const Color(0xFF8A9AA5);
+    final IconData stateIcon = isPlaying
+        ? Icons.volume_up_rounded
+        : _isAnalyzing
+            ? Icons.graphic_eq_rounded
+            : isRunning
+                ? Icons.hearing_rounded
+                : Icons.hearing_disabled_rounded;
+    final String stateLabel = isPlaying
+        ? 'در حال پخش صدا'
+        : _isAnalyzing
+            ? 'در حال تحلیل صدا'
+            : isRunning
+                ? 'شنود فعال است'
+                : 'شنود متوقف است';
+
+    Widget actionButton({
+      required String label,
+      required IconData icon,
+      required Color color,
+      required VoidCallback? onPressed,
+      bool outlined = false,
+    }) {
+      final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(16));
+      return SizedBox(
+        height: 58,
+        width: double.infinity,
+        child: outlined
+            ? OutlinedButton.icon(
+                onPressed: onPressed,
+                icon: Icon(icon, size: 21),
+                label: Text(label, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: color,
+                  side: BorderSide(color: color.withOpacity(0.75), width: 1.2),
+                  shape: shape,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+              )
+            : ElevatedButton.icon(
+                onPressed: onPressed,
+                icon: Icon(icon, size: 21),
+                label: Text(label, textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: color,
+                  foregroundColor: const Color(0xFF061820),
+                  disabledBackgroundColor: color.withOpacity(0.22),
+                  disabledForegroundColor: Colors.white38,
+                  elevation: 0,
+                  shape: shape,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+              ),
+      );
+    }
+
+    Widget sectionTitle(String title, IconData icon) => Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        textDirection: TextDirection.rtl,
+        children: [
+          Icon(icon, color: const Color(0xFF35D6C0), size: 21),
+          const SizedBox(width: 8),
+          Text(title, textAlign: TextAlign.right, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white)),
+        ],
+      ),
+    );
 
     return Scaffold(
       appBar: AppBar(
         centerTitle: true,
-        backgroundColor: const Color(0xFF007F5F),
+        backgroundColor: const Color(0xFF0B2935),
         foregroundColor: Colors.white,
-        title: const Text(
-          'ضد کلاغ حاج اصغر',
-          style: TextStyle(
-            fontSize: 23,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 0.2,
-          ),
-        ),
+        elevation: 0,
+        title: const Text('ضد کلاغ حاج اصغر', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 22),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // نام HAKnet در گوشه بالای صفحه اصلی
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'HAKnet',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 2,
-                    color: Colors.greenAccent,
-                    shadows: [
-                      Shadow(
-                        color: Color(0x8000FF80),
-                        blurRadius: 8,
-                      ),
-                    ],
+              // برند و وضعیت واقعی برنامه
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft,
+                    colors: [Color(0xFF123B49), Color(0xFF0C2632)],
                   ),
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: const Color(0xFF23616B), width: 1),
                 ),
-              ),
-              const SizedBox(height: 8),
-
-              Icon(
-                isPlaying
-                    ? Icons.volume_up_rounded
-                    : isRunning
-                        ? Icons.hearing_rounded
-                        : Icons.hearing_disabled_rounded,
-                size: 54,
-                color: isPlaying
-                    ? Colors.orange
-                    : isRunning
-                        ? Colors.greenAccent
-                        : Colors.grey,
-              ),
-              const SizedBox(height: 8),
-
-              Text(
-                status,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 15),
-              ),
-              const SizedBox(height: 8),
-
-              // تنظیم آستانه تشخیص
-              Card(
-                color: const Color(0xFF1C2A33),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
+                child: Column(
+                  children: [
+                    const Text('HAKnet', style: TextStyle(fontSize: 23, fontWeight: FontWeight.w900, letterSpacing: 3, color: Color(0xFF42E2CB))),
+                    const SizedBox(height: 5),
+                    const Text('سامانه هوشمند تشخیص و دورکردن کلاغ', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFFB7D0D8), fontSize: 12)),
+                    const SizedBox(height: 18),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+                      decoration: BoxDecoration(
+                        color: stateColor.withOpacity(0.10),
+                        border: Border.all(color: stateColor.withOpacity(0.65)),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Row(
                         textDirection: TextDirection.rtl,
                         children: [
-                          const Expanded(
-                            child: Text(
-                              'آستانه اطمینان تشخیص',
-                              textAlign: TextAlign.right,
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                              ),
+                          Container(
+                            width: 44, height: 44,
+                            decoration: BoxDecoration(color: stateColor.withOpacity(0.16), borderRadius: BorderRadius.circular(13)),
+                            child: Icon(stateIcon, color: stateColor, size: 27),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(stateLabel, textDirection: TextDirection.rtl, style: TextStyle(color: stateColor, fontSize: 15, fontWeight: FontWeight.w900)),
+                                const SizedBox(height: 4),
+                                Text(status, textDirection: TextDirection.rtl, style: const TextStyle(color: Color(0xFFD5E4E8), fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis),
+                              ],
                             ),
                           ),
-                          Text(
-                            '${(_crowThreshold * 100).round()}٪',
-                            textAlign: TextAlign.left,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w900,
-                              color: Colors.greenAccent,
-                              fontSize: 17,
-                            ),
-                          ),
+                          Container(width: 8, height: 8, decoration: BoxDecoration(color: stateColor, shape: BoxShape.circle)),
                         ],
                       ),
-                      Slider(
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // تنظیمات موردنیاز روی صفحه اصلی باقی می‌مانند؛ صفحه تنظیمات جداگانه نداریم.
+              Container(
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(color: const Color(0xFF102A35), borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFF214652))),
+                child: Column(
+                  children: [
+                    sectionTitle('تنظیم تشخیص', Icons.tune_rounded),
+                    Row(
+                      textDirection: TextDirection.rtl,
+                      children: [
+                        const Expanded(child: Text('آستانه اطمینان', textDirection: TextDirection.rtl, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13))),
+                        Container(padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5), decoration: BoxDecoration(color: const Color(0xFF16483F), borderRadius: BorderRadius.circular(10)), child: Text('${(_crowThreshold * 100).round()}٪', style: const TextStyle(color: Color(0xFF52E6C4), fontWeight: FontWeight.w900))),
+                      ],
+                    ),
+                    SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        activeTrackColor: const Color(0xFF35D6B5),
+                        inactiveTrackColor: const Color(0xFF31515A),
+                        thumbColor: const Color(0xFF65F0D4),
+                        overlayColor: const Color(0x2235D6B5),
+                        trackHeight: 4,
+                      ),
+                      child: Slider(
                         value: _crowThreshold,
                         min: _minThreshold,
                         max: _maxThreshold,
                         divisions: thresholdSteps,
                         label: '${(_crowThreshold * 100).round()}٪',
-                        activeColor: Colors.greenAccent,
-                        onChanged: (value) {
-                          setState(() {
-                            _crowThreshold =
-                                double.parse(value.toStringAsFixed(2));
-
-                            _consecutiveCrowDetections = 0;
-                            _crowTriggerLatched = false;
-                          });
-                        },
+                        onChanged: (value) => setState(() {
+                          _crowThreshold = double.parse(value.toStringAsFixed(2));
+                          _consecutiveCrowDetections = 0;
+                          _crowTriggerLatched = false;
+                        }),
                       ),
-                      const SizedBox(height: 4),
-                      Row(
-                        textDirection: TextDirection.rtl,
-                        children: [
-                          const Expanded(
-                            child: Text(
-                              'تعداد تشخیص متوالی کلاغ',
-                              textAlign: TextAlign.right,
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                          DropdownButton<int>(
-                            value: _requiredCrowDetections,
-                            dropdownColor: const Color(0xFF1C2A33),
-                            items: List.generate(
-                              _maxRequiredCrowDetections,
-                              (index) => DropdownMenuItem<int>(
-                                value: index + 1,
-                                child: Text('${index + 1} بار'),
-                              ),
-                            ),
-                            onChanged: (value) {
-                              if (value == null) return;
-                              setState(() {
-                                _requiredCrowDetections = value;
-                                _consecutiveCrowDetections = 0;
-                                _crowTriggerLatched = false;
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                      const Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text('10٪', style: TextStyle(fontSize: 12)),
-                          Text(
-                            'مقدار اولیه: 35٪',
-                            style: TextStyle(fontSize: 12),
-                          ),
-                          Text('95٪', style: TextStyle(fontSize: 12)),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 8),
-
-              Expanded(
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1C2A33),
-                    border: Border.all(color: Colors.white24),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                    ),
+                    const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('10٪', style: TextStyle(color: Color(0xFF9DB5BD), fontSize: 11)), Text('پیش‌فرض: 35٪', style: TextStyle(color: Color(0xFF9DB5BD), fontSize: 11)), Text('95٪', style: TextStyle(color: Color(0xFF9DB5BD), fontSize: 11))]),
+                    const SizedBox(height: 13),
+                    Row(
+                      textDirection: TextDirection.rtl,
                       children: [
-                        const Text(
-                          'گونه‌های شناسایی‌شده',
-                          textAlign: TextAlign.right,
-                          textDirection: TextDirection.rtl,
-                          style: TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.greenAccent,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          detectionText,
-                          textAlign: TextAlign.right,
-                          textDirection: TextDirection.rtl,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            height: 1.7,
+                        const Expanded(child: Text('تعداد تشخیص متوالی کلاغ', textDirection: TextDirection.rtl, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          decoration: BoxDecoration(color: const Color(0xFF0A202B), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFF31515A))),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<int>(
+                              value: _requiredCrowDetections,
+                              dropdownColor: const Color(0xFF12313D),
+                              iconEnabledColor: const Color(0xFF42E2CB),
+                              items: List.generate(5, (i) => i + 1).map((n) => DropdownMenuItem<int>(value: n, child: Text('$n بار'))).toList(),
+                              onChanged: (value) {
+                                if (value == null) return;
+                                setState(() { _requiredCrowDetections = value; _consecutiveCrowDetections = 0; _crowTriggerLatched = false; });
+                              },
+                            ),
                           ),
                         ),
                       ],
                     ),
-                  ),
+                  ],
                 ),
               ),
+              const SizedBox(height: 16),
 
+              Container(
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(color: const Color(0xFF102A35), borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFF214652))),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    sectionTitle('گونه‌های شناسایی‌شده بالاتر از آستانه', Icons.radar_rounded),
+                    Container(
+                      constraints: const BoxConstraints(minHeight: 86),
+                      padding: const EdgeInsets.all(13),
+                      decoration: BoxDecoration(color: const Color(0xFF091F29), borderRadius: BorderRadius.circular(14)),
+                      child: Text(detectionText, textAlign: TextAlign.right, textDirection: TextDirection.rtl, style: const TextStyle(fontSize: 14, height: 1.7, color: Color(0xFFD7E8EC))),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              sectionTitle('کنترل برنامه', Icons.gamepad_rounded),
+              Row(children: [
+                Expanded(child: actionButton(label: 'شروع شنود', icon: Icons.hearing_rounded, color: const Color(0xFF42DDB6), onPressed: isRunning || isPlaying ? null : startListening)),
+                const SizedBox(width: 10),
+                Expanded(child: actionButton(label: 'توقف شنود', icon: Icons.hearing_disabled_rounded, color: const Color(0xFFFF6B78), onPressed: isRunning ? stopListening : null)),
+              ]),
               const SizedBox(height: 10),
-
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: isRunning || isPlaying
-                      ? null
-                      : startListening,
-                  icon: const Icon(Icons.hearing),
-                  label: const Text('شروع شنود'),
-                ),
-              ),
-              const SizedBox(height: 6),
-
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: isRunning ? stopListening : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red.shade700,
-                    foregroundColor: Colors.white,
-                  ),
-                  icon: const Icon(Icons.hearing_disabled),
-                  label: const Text('توقف شنود'),
-                ),
-              ),
-              const SizedBox(height: 6),
-
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: isPlaying ? null : playRandomSound,
-                      icon: const Icon(Icons.shuffle),
-                      label: const Text('پخش تصادفی'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: showAudioManager,
-                      icon: const Icon(Icons.library_music),
-                      label: const Text('مدیریت صداها'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: isPlaying ? stopPlayback : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.deepOrange,
-                    foregroundColor: Colors.white,
-                  ),
-                  icon: const Icon(Icons.stop_circle),
-                  label: const Text('قطع پخش'),
-                ),
-              ),
-              const SizedBox(height: 6),
-
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: showAboutDialogBox,
-                  icon: const Icon(Icons.info_outline),
-                  label: const Text('دربارهٔ برنامه'),
-                ),
-              ),
-              const SizedBox(height: 6),
-
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: exitApp,
-                  icon: const Icon(Icons.exit_to_app),
-                  label: const Text('خروج از برنامه'),
-                ),
-              ),
+              Row(children: [
+                Expanded(child: actionButton(label: 'پخش تصادفی', icon: Icons.shuffle_rounded, color: const Color(0xFFFFC15A), onPressed: isPlaying ? null : playRandomSound)),
+                const SizedBox(width: 10),
+                Expanded(child: actionButton(label: 'قطع پخش', icon: Icons.stop_circle_rounded, color: const Color(0xFFFF965E), onPressed: isPlaying ? stopPlayback : null)),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: actionButton(label: 'مدیریت فایل‌های صوتی (${_importedSounds.length})', icon: Icons.library_music_rounded, color: const Color(0xFF5DC7F2), onPressed: showAudioManager, outlined: true)),
+                const SizedBox(width: 10),
+                Expanded(child: actionButton(label: 'درباره برنامه', icon: Icons.info_outline_rounded, color: const Color(0xFFB4A2FF), onPressed: showAboutDialogBox, outlined: true)),
+              ]),
+              const SizedBox(height: 10),
+              actionButton(label: 'خروج از برنامه', icon: Icons.exit_to_app_rounded, color: const Color(0xFF9AAEB7), onPressed: exitApp, outlined: true),
+              const SizedBox(height: 16),
+              const Center(child: Text('HAKnet  •  نسخه 1.0.0', style: TextStyle(color: Color(0xFF6F929E), fontSize: 11, letterSpacing: 0.5))),
             ],
           ),
         ),

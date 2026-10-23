@@ -1,0 +1,370 @@
+name: Build AntiCrow Android App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Checkout BirdNET model repository
+        uses: actions/checkout@v4
+        with:
+          repository: birdnet-team/birdnet-live-app
+          ref: main
+          path: birdnet-live-app
+          lfs: true
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Check Flutter project
+        run: flutter --version
+
+      - name: Copy BirdNET model files
+        run: |
+          mkdir -p assets/models
+
+          cp birdnet-live-app/assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_FP16.onnx assets/models/
+          cp birdnet-live-app/assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_Labels.csv assets/models/
+          cp birdnet-live-app/assets/models/model_config.json assets/models/
+          cp birdnet-live-app/assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_ScoreBlacklist.json assets/models/
+
+          echo "Checking ONNX model..."
+          ls -lh assets/models/
+
+          if grep -q "version https://git-lfs.github.com/spec/v1" assets/models/BirdNET+_V3.0-preview3.1_Global_10K-pruned_FP16.onnx; then
+            echo "ERROR: ONNX model is only an LFS pointer"
+            exit 1
+          fi
+
+      - name: Create Android project files
+        run: flutter create --platforms=android --project-name simple_android_app .
+
+      - name: Configure Android exit behavior
+        run: |
+          python3 <<'PYCODE'
+          import re
+          from pathlib import Path
+
+          gradle = Path("android/app/build.gradle.kts")
+          if not gradle.exists():
+              gradle = Path("android/app/build.gradle")
+
+          content = gradle.read_text()
+          match = re.search(r'namespace\s*[= ]\s*["\']([^"\']+)', content)
+          if not match:
+              raise SystemExit("ERROR: Android namespace not found")
+
+          package_name = match.group(1)
+          package_path = Path("android/app/src/main/kotlin") / Path(*package_name.split("."))
+          package_path.mkdir(parents=True, exist_ok=True)
+
+          main_activity = package_path / "MainActivity.kt"
+          main_activity.write_text(f"""package {package_name}
+
+          import android.content.Intent
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {{
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "anticrow/exit")
+                      .setMethodCallHandler {{ call, result ->
+                          if (call.method == "finishAndRemoveTask") {{
+                              finishAndRemoveTask()
+                              result.success(null)
+                          }} else {{
+                              result.notImplemented()
+                          }}
+                      }}
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "anticrow/background")
+                      .setMethodCallHandler {{ call, result ->
+                          when (call.method) {{
+                              "start" -> {{
+                                  val serviceIntent = Intent(this, MicrophoneForegroundService::class.java)
+                                  if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {{
+                                      startForegroundService(serviceIntent)
+                                  }} else {{
+                                      startService(serviceIntent)
+                                  }}
+                                  result.success(null)
+                              }}
+                              "stop" -> {{
+                                  stopService(Intent(this, MicrophoneForegroundService::class.java))
+                                  result.success(null)
+                              }}
+                              else -> result.notImplemented()
+                          }}
+                      }}
+              }}
+          }}
+          """)
+
+          print(f"Configured Android exit behavior in {main_activity}")
+          PYCODE
+
+      - name: Configure microphone foreground service
+        run: |
+          python3 <<'PYCODE'
+          import re
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          import textwrap
+
+          gradle = Path("android/app/build.gradle.kts")
+          if not gradle.exists():
+              gradle = Path("android/app/build.gradle")
+          content = gradle.read_text()
+          match = re.search(r'namespace\s*[= ]\s*["\']([^"\']+)', content)
+          if not match:
+              raise SystemExit("ERROR: Android namespace not found")
+          package_name = match.group(1)
+          package_path = Path("android/app/src/main/kotlin") / Path(*package_name.split("."))
+          package_path.mkdir(parents=True, exist_ok=True)
+
+          service_code = """package @PACKAGE@
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.IBinder
+
+          class MicrophoneForegroundService : Service() {
+              override fun onCreate() {
+                  super.onCreate()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          "anticrow_listening",
+                          "AntiCrow microphone",
+                          NotificationManager.IMPORTANCE_LOW
+                      )
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+                  }
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      Notification.Builder(this, "anticrow_listening")
+                  } else {
+                      @Suppress("DEPRECATION")
+                      Notification.Builder(this)
+                  }
+                  val notification = builder
+                      .setContentTitle("AntiCrow فعال است")
+                      .setContentText("شنود و تحلیل صدا در حال اجراست")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setOngoing(true)
+                      .build()
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(4102, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  } else {
+                      startForeground(4102, notification)
+                  }
+                  return START_NOT_STICKY
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+          """.replace("@PACKAGE@", package_name)
+          (package_path / "MicrophoneForegroundService.kt").write_text(textwrap.dedent(service_code))
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+          android = "http://schemas.android.com/apk/res/android"
+          ET.register_namespace("android", android)
+          permissions = [
+              "android.permission.RECORD_AUDIO",
+              "android.permission.FOREGROUND_SERVICE",
+              "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+              "android.permission.WAKE_LOCK",
+              "android.permission.POST_NOTIFICATIONS",
+          ]
+          existing = {node.attrib.get(f"{{{android}}}name") for node in root.findall("uses-permission")}
+          app = root.find("application")
+          if app is None:
+              raise SystemExit("ERROR: Android application element not found")
+          app_index = list(root).index(app)
+          for permission in permissions:
+              if permission not in existing:
+                  root.insert(app_index, ET.Element("uses-permission", {f"{{{android}}}name": permission}))
+                  app_index += 1
+          service_name = f"{package_name}.MicrophoneForegroundService"
+          if not any(node.attrib.get(f"{{{android}}}name") == service_name for node in app.findall("service")):
+              ET.SubElement(app, "service", {
+                  f"{{{android}}}name": service_name,
+                  f"{{{android}}}enabled": "true",
+                  f"{{{android}}}exported": "false",
+                  f"{{{android}}}foregroundServiceType": "microphone",
+              })
+          tree.write(manifest, encoding="utf-8", xml_declaration=True)
+          print(f"Configured microphone foreground service for {package_name}")
+          PYCODE
+
+      - name: Set Android compile SDK
+        run: |
+          GRADLE="android/app/build.gradle.kts"
+
+          if [ -f "$GRADLE" ]; then
+            python3 - "$GRADLE" <<'PYCODE'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          s, n = re.subn(r'compileSdk\s*=\s*.*', 'compileSdk = 36', s, count=1)
+          if n == 0:
+              s, n = re.subn(r'compileSdk\s+.*', 'compileSdk = 36', s, count=1)
+          if n == 0:
+              raise SystemExit("ERROR: compileSdk declaration not found")
+          open(p, 'w').write(s)
+          PYCODE
+          else
+            GRADLE="android/app/build.gradle"
+            if [ ! -f "$GRADLE" ]; then
+              echo "ERROR: Gradle file not found"
+              exit 1
+            fi
+            python3 - "$GRADLE" <<'PYCODE'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          s, n = re.subn(r'compileSdk\s+.*', 'compileSdk 36', s, count=1)
+          if n == 0:
+              raise SystemExit("ERROR: compileSdk declaration not found")
+          open(p, 'w').write(s)
+          PYCODE
+          fi
+
+          grep -n 'compileSdk' "$GRADLE"
+
+      - name: Configure AntiCrow name and icon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "ERROR: AndroidManifest.xml not found"
+            exit 1
+          fi
+
+          if [ ! -f assets/icon.png ]; then
+            echo "ERROR: assets/icon.png not found"
+            exit 1
+          fi
+
+          sed -i 's/android:label="[^"]*"/android:label="AntiCrow"/' "$MANIFEST"
+
+          RES="android/app/src/main/res"
+          rm -f "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          rm -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
+
+          for entry in "mdpi:48" "hdpi:72" "xhdpi:96" "xxhdpi:144" "xxxhdpi:192"; do
+            density="${entry%%:*}"
+            size="${entry##*:}"
+            mkdir -p "$RES/mipmap-$density"
+            convert assets/icon.png -resize "${size}x${size}!" "$RES/mipmap-$density/ic_launcher.png"
+            convert assets/icon.png -resize "${size}x${size}!" "$RES/mipmap-$density/ic_launcher_round.png"
+          done
+
+          echo "AntiCrow app label and launcher icons configured."
+          grep 'android:label=' "$MANIFEST"
+
+      - name: Show Android release configuration
+        run: |
+          if [ -f android/app/build.gradle.kts ]; then
+            cat android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            cat android/app/build.gradle
+          else
+            echo "ERROR: Gradle build file not found"
+            exit 1
+          fi
+
+      - name: Add ONNX Runtime ProGuard rules
+        run: |
+          mkdir -p android/app
+          echo '-keep class ai.onnxruntime.** { *; }' > android/app/proguard-rules.pro
+          cat android/app/proguard-rules.pro
+
+      - name: Show dependencies
+        run: cat pubspec.yaml
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Fix file_picker compileSdk
+        run: |
+          FILE="$HOME/.pub-cache/hosted/pub.dev/file_picker-8.3.7/android/build.gradle"
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: file_picker Gradle file not found"
+            exit 1
+          fi
+          sed -i 's/compileSdk 34/compileSdk 36/' "$FILE"
+          echo "=== Verify file_picker compileSdk ==="
+          grep -n 'compileSdk' "$FILE"
+          if ! grep -q 'compileSdk 36' "$FILE"; then
+            echo "ERROR: compileSdk was not updated"
+            exit 1
+          fi
+
+      - name: Verify dependencies
+        run: flutter pub deps
+
+      - name: Build APK
+        run: |
+          flutter build apk --release
+          cp build/app/outputs/flutter-apk/app-release.apk AntiCrow.apk
+          ls -lh AntiCrow.apk
+
+      - name: Upload APK
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntiCrow-APK
+          path: AntiCrow.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Delete previous AntiCrow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          echo "New artifact ID: $NEW_ARTIFACT_ID"
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.name == \"AntiCrow-APK\" and (.id | tostring) != \"${NEW_ARTIFACT_ID}\") | .id" |
+          while read -r id; do
+            if [ -n "$id" ]; then
+              echo "Deleting old artifact ID: $id"
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+            fi
+          done
+          echo "Previous AntiCrow artifacts cleanup completed."

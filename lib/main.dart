@@ -1243,7 +1243,7 @@ class _CrowHomePageState extends State<CrowHomePage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      'ساخته شده توسط: HAKnet',
+                      'HAKnet',
                       textDirection: TextDirection.rtl,
                       textAlign: TextAlign.center,
                       style: TextStyle(
